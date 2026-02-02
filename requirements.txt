@@ -1,0 +1,35 @@
+# Core ML
+numpy
+matplotlib
+scikit-learn
+
+# Embeddings
+sentence-transformers
+
+# Document processing
+pypdf
+python-docx
+PyMuPDF
+pillow
+
+# OCR (docTR with PyTorch backend)
+python-doctr[torch]
+
+# Vector database
+chromadb
+
+# LLM
+anthropic
+
+# Config
+pyyaml
+python-dotenv
+
+# Web server
+fastapi
+uvicorn[standard]
+
+# Google Calendar
+google-auth
+google-auth-oauthlib
+google-api-python-client
