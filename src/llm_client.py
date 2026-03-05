@@ -70,6 +70,13 @@ class LLMClient:
 
         if provider == "claude":
             return ClaudeClient(model=model)
+        elif provider == "groq":
+            return OpenAICompatClient(
+                model=model,
+                base_url="https://api.groq.com/openai/v1",
+                api_key=os.getenv("GROQ_API_KEY", ""),
+                provider="groq",
+            )
         elif provider in ("ollama", "openai"):
             base_url = (
                 os.getenv("OLLAMA_URL", "http://localhost:11434/v1")
@@ -84,7 +91,7 @@ class LLMClient:
             return OpenAICompatClient(model=model, base_url=base_url, api_key=api_key,
                                       provider=provider)
         else:
-            raise ValueError(f"Unknown MODEL_PROVIDER: {provider!r}. Use claude, ollama, or openai.")
+            raise ValueError(f"Unknown MODEL_PROVIDER: {provider!r}. Use claude, groq, ollama, or openai.")
 
 
 # ---------------------------------------------------------------------------
