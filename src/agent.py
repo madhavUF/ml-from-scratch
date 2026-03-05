@@ -23,6 +23,8 @@ load_dotenv()
 from rag import get_engine
 import calendar_integration
 import gmail_integration
+import nest_integration
+from src.goals import save_goals, get_today_goals, mark_goal_complete, format_goals_status
 
 # =============================================================================
 # AgentGate — optional credential broker
@@ -179,6 +181,136 @@ TOOLS = [
                 }
             },
             "required": ["title", "content"]
+        }
+    },
+    {
+        "name": "get_thermostat_status",
+        "description": (
+            "Get the current status of one or all Nest thermostats — temperature, humidity, mode, "
+            "and setpoints. Use when the user asks about home temperature, thermostat, heating, or cooling. "
+            "Leave device_id empty to get all thermostats."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "device_id": {
+                    "type": "string",
+                    "description": "Full SDM device ID. Omit to fetch all thermostats."
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "set_thermostat",
+        "description": (
+            "Control a Nest thermostat — set the target temperature or change the mode. "
+            "Temperature is always in Fahrenheit. "
+            "mode options: HEAT, COOL, HEATCOOL, OFF."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "device_id": {
+                    "type": "string",
+                    "description": "Full SDM device ID of the thermostat to control."
+                },
+                "temperature_f": {
+                    "type": "number",
+                    "description": "Target temperature in Fahrenheit."
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["HEAT", "COOL", "HEATCOOL", "OFF"],
+                    "description": "Thermostat mode to set. Optional if only changing temperature."
+                }
+            },
+            "required": ["device_id"]
+        }
+    },
+    {
+        "name": "get_camera_status",
+        "description": (
+            "Get the status and features of one or all Nest cameras. "
+            "Use when the user asks about their cameras or security."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "device_id": {
+                    "type": "string",
+                    "description": "Full SDM device ID. Omit to fetch all cameras."
+                }
+            },
+            "required": []
+        }
+    },
+    {
+        "name": "get_daily_goals",
+        "description": (
+            "Get today's goals and their completion status for the current user. "
+            "Use this when the user asks about their goals, progress, or what they planned for today."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user_id": {
+                    "type": "string",
+                    "description": "The user's Telegram user ID."
+                }
+            },
+            "required": ["user_id"]
+        }
+    },
+    {
+        "name": "save_daily_goals",
+        "description": (
+            "Save the user's 3 goals for today. Call this when the user provides their daily goals, "
+            "typically in response to the morning prompt. Extract exactly the goal texts from their message."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user_id": {
+                    "type": "string",
+                    "description": "The user's Telegram user ID."
+                },
+                "goals": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of up to 3 goal strings extracted from the user's message.",
+                    "maxItems": 3
+                }
+            },
+            "required": ["user_id", "goals"]
+        }
+    },
+    {
+        "name": "update_goal_status",
+        "description": (
+            "Mark one of today's goals as complete or incomplete. "
+            "Use this when the user says a goal is done, finished, or complete. "
+            "Goal numbers are 1, 2, or 3."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "user_id": {
+                    "type": "string",
+                    "description": "The user's Telegram user ID."
+                },
+                "goal_number": {
+                    "type": "integer",
+                    "description": "Which goal to update (1, 2, or 3).",
+                    "enum": [1, 2, 3]
+                },
+                "completed": {
+                    "type": "boolean",
+                    "description": "True to mark complete, false to unmark.",
+                    "default": True
+                }
+            },
+            "required": ["user_id", "goal_number"]
         }
     },
     {
@@ -343,6 +475,62 @@ def _execute_send_email(to: str, subject: str, body: str) -> dict:
         return {"error": f"Send email failed: {e}"}
 
 
+def _execute_get_thermostat_status(device_id: str = None) -> dict:
+    if not nest_integration.is_authenticated():
+        return {"error": "Nest is not connected. Please connect via the dashboard sidebar."}
+    if not nest_integration.NEST_PROJECT_ID:
+        return {"error": "NEST_PROJECT_ID not set in .env"}
+    devices = nest_integration.list_devices()
+    thermostats = [d for d in devices if d["type"] == "THERMOSTAT"]
+    if not thermostats:
+        return {"error": "No thermostats found in your Nest account."}
+    if device_id:
+        return nest_integration.get_thermostat_status(device_id)
+    return {"thermostats": [nest_integration.get_thermostat_status(d["id"]) for d in thermostats]}
+
+
+def _execute_set_thermostat(device_id: str, temperature_f: float = None, mode: str = None) -> dict:
+    if not nest_integration.is_authenticated():
+        return {"error": "Nest is not connected. Please connect via the dashboard sidebar."}
+    results = {}
+    if mode:
+        results["mode_result"] = nest_integration.set_thermostat_mode(device_id, mode)
+    if temperature_f is not None:
+        results["temp_result"] = nest_integration.set_thermostat_temperature(device_id, temperature_f, mode)
+    if not results:
+        return {"error": "Provide temperature_f or mode to set."}
+    results["new_status"] = nest_integration.get_thermostat_status(device_id)
+    return results
+
+
+def _execute_get_camera_status(device_id: str = None) -> dict:
+    if not nest_integration.is_authenticated():
+        return {"error": "Nest is not connected. Please connect via the dashboard sidebar."}
+    devices = nest_integration.list_devices()
+    cameras = [d for d in devices if d["type"] in ("CAMERA", "DOORBELL", "DISPLAY")]
+    if not cameras:
+        return {"error": "No cameras found in your Nest account."}
+    if device_id:
+        return nest_integration.get_camera_status(device_id)
+    return {"cameras": [nest_integration.get_camera_status(d["id"]) for d in cameras]}
+
+
+def _execute_get_daily_goals(user_id: str) -> dict:
+    goals = get_today_goals(int(user_id))
+    return {"goals": goals, "summary": format_goals_status(goals)}
+
+
+def _execute_save_daily_goals(user_id: str, goals: list) -> dict:
+    return save_goals(int(user_id), goals)
+
+
+def _execute_update_goal_status(user_id: str, goal_number: int, completed: bool = True) -> dict:
+    result = mark_goal_complete(int(user_id), goal_number, completed)
+    goals = get_today_goals(int(user_id))
+    result["summary"] = format_goals_status(goals)
+    return result
+
+
 def _execute_create_email_draft(to: str, subject: str, body: str) -> dict:
     """Create a Gmail draft."""
     if _GATE_URL:
@@ -357,13 +545,19 @@ def _execute_create_email_draft(to: str, subject: str, body: str) -> dict:
 
 # Dispatch table: tool name → executor lambda
 TOOL_EXECUTORS: dict[str, Callable] = {
-    "save_document": lambda inp: _execute_save_document(inp["title"], inp["content"]),
-    "search_documents": lambda inp: _execute_search_documents(inp["query"]),
+    "save_document":     lambda inp: _execute_save_document(inp["title"], inp["content"]),
+    "search_documents":  lambda inp: _execute_search_documents(inp["query"]),
     "get_calendar_events": lambda inp: _execute_get_calendar_events(inp.get("days", 7)),
     "get_recent_emails": lambda inp: _execute_get_recent_emails(inp.get("max_results", 5)),
-    "search_emails": lambda inp: _execute_search_emails(inp["query"], inp.get("max_results", 5)),
-    "send_email": lambda inp: _execute_send_email(inp["to"], inp["subject"], inp["body"]),
+    "search_emails":     lambda inp: _execute_search_emails(inp["query"], inp.get("max_results", 5)),
+    "send_email":        lambda inp: _execute_send_email(inp["to"], inp["subject"], inp["body"]),
     "create_email_draft": lambda inp: _execute_create_email_draft(inp["to"], inp["subject"], inp["body"]),
+    "get_thermostat_status": lambda inp: _execute_get_thermostat_status(inp.get("device_id")),
+    "set_thermostat":        lambda inp: _execute_set_thermostat(inp["device_id"], inp.get("temperature_f"), inp.get("mode")),
+    "get_camera_status":     lambda inp: _execute_get_camera_status(inp.get("device_id")),
+    "get_daily_goals":   lambda inp: _execute_get_daily_goals(inp["user_id"]),
+    "save_daily_goals":  lambda inp: _execute_save_daily_goals(inp["user_id"], inp["goals"]),
+    "update_goal_status": lambda inp: _execute_update_goal_status(inp["user_id"], inp["goal_number"], inp.get("completed", True)),
 }
 
 
@@ -378,6 +572,7 @@ Today is {today}.
 - **Documents**: Search personal documents, notes, IDs, insurance, receipts, and any uploaded files. Also save new notes/information using `save_document`.
 - **Calendar**: Check upcoming events and schedule via Google Calendar.
 - **Email**: Read inbox, search emails, create drafts, or send emails via Gmail.
+- **Vision**: Analyze photos and images sent by the user — plants, objects, text in images, receipts, etc.
 - **General knowledge**: Answer questions using your training knowledge when no tool is needed.
 
 ## Guidelines
@@ -418,20 +613,23 @@ _init_db()
 
 
 def _serialize_messages(messages: list) -> str:
-    """Convert messages list (may contain Pydantic SDK objects) to JSON string."""
+    """Convert messages list (may contain Pydantic SDK objects) to JSON string.
+    Image blocks are replaced with a text placeholder to avoid storing large base64 blobs."""
     serializable = []
     for msg in messages:
         content = msg["content"]
         if isinstance(content, str):
             serializable.append({"role": msg["role"], "content": content})
         elif isinstance(content, list):
-            serializable.append({
-                "role": msg["role"],
-                "content": [
-                    block.model_dump() if hasattr(block, "model_dump") else block
-                    for block in content
-                ]
-            })
+            blocks = []
+            for block in content:
+                b = block.model_dump() if hasattr(block, "model_dump") else block
+                # Strip base64 image data — too large to store in SQLite session
+                if isinstance(b, dict) and b.get("type") == "image":
+                    blocks.append({"type": "text", "text": "[Image attached]"})
+                else:
+                    blocks.append(b)
+            serializable.append({"role": msg["role"], "content": blocks})
     return json.dumps(serializable)
 
 
@@ -484,6 +682,8 @@ def _derive_intent(tools_used: list[str]) -> str:
     """Map tool names used → UI badge intent string."""
     if not tools_used:
         return "general"
+    if any(t in tools_used for t in ("get_daily_goals", "save_daily_goals", "update_goal_status")):
+        return "goals"
     if any(t in tools_used for t in ("search_documents", "save_document")):
         return "documents"
     if any(t in tools_used for t in ("get_recent_emails", "search_emails", "send_email", "create_email_draft")):
@@ -497,9 +697,15 @@ def _derive_intent(tools_used: list[str]) -> str:
 # Agent Loop
 # =============================================================================
 
-def run_agent(query: str, session_id: str = None, max_iterations: int = 10) -> dict:
+def run_agent(query: str, session_id: str = None, max_iterations: int = 10, image_data: dict = None) -> dict:
     """
     Run the Claude tool_use agent loop.
+
+    Args:
+        query:      The user's text message.
+        session_id: Persistent session ID for multi-turn memory.
+        image_data: Optional dict with keys 'data' (base64 str) and 'media_type' (e.g. 'image/jpeg').
+                    When provided, the image is sent to Claude Vision alongside the query.
 
     Returns:
         {
@@ -517,8 +723,23 @@ def run_agent(query: str, session_id: str = None, max_iterations: int = 10) -> d
 
     messages = _get_or_create_session(session_id)
 
-    # Append the new user message
-    messages.append({"role": "user", "content": query})
+    # Build user message — include image block if provided
+    if image_data:
+        user_content = [
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": image_data["media_type"],
+                    "data": image_data["data"]
+                }
+            },
+            {"type": "text", "text": query}
+        ]
+    else:
+        user_content = query
+
+    messages.append({"role": "user", "content": user_content})
 
     system = SYSTEM_PROMPT.format(today=datetime.now().strftime("%A, %B %d, %Y"))
 
